@@ -1,0 +1,92 @@
+name: Fetch, Compress, and Split File
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'URL of the file to download'
+        required: true
+        type: string
+      destination_path:
+        description: 'Path inside the repository where the file should be saved (before compression)'
+        required: true
+        type: string
+        default: 'downloaded-file'
+      archive_name:
+        description: 'Base name for the split archive (without extension)'
+        required: true
+        type: string
+        default: 'archive'
+      part_size:
+        description: 'Size of each split part (in MB)'
+        required: false
+        type: string
+        default: '30'
+      commit_message:
+        description: 'Custom commit message'
+        required: false
+        type: string
+        default: 'Update compressed and split archive from external source'
+
+jobs:
+  fetch-compress-split:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove all files except .github
+        run: |
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name '.git' \
+            ! -name '.github' \
+            -exec rm -rf {} +
+
+      - name: Start fresh git history (orphan branch)
+        run: |
+          git checkout --orphan clean-start
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github
+          git commit -m "Initial clean state"
+
+      - name: Install compression tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+
+      - name: Download file
+        run: |
+          mkdir -p "$(dirname "${{ github.event.inputs.destination_path }}")"
+          curl -sSL "${{ github.event.inputs.file_url }}" -o "${{ github.event.inputs.destination_path }}"
+
+      - name: Compress and split the file
+        run: |
+          mkdir -p split_archive
+          BASENAME=$(basename "${{ github.event.inputs.destination_path }}")
+          7z -v${{ github.event.inputs.part_size }}m a "split_archive/${{ github.event.inputs.archive_name }}.7z" "${{ github.event.inputs.destination_path }}"
+          rm "${{ github.event.inputs.destination_path }}"
+          DEST_DIR=$(dirname "${{ github.event.inputs.destination_path }}")
+          mkdir -p "$DEST_DIR"
+          mv split_archive/* "$DEST_DIR/"
+          rmdir split_archive
+
+      - name: Generate checksum for verification
+        run: |
+          DEST_DIR=$(dirname "${{ github.event.inputs.destination_path }}")
+          cd "$DEST_DIR"
+          sha256sum ${{ github.event.inputs.archive_name }}.7z.* > ${{ github.event.inputs.archive_name }}.sha256
+
+      - name: Commit and push changes (force push, wipes old history)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit --amend -m "${{ github.event.inputs.commit_message }}"
+          git push --force origin HEAD:${{ github.ref_name }}
